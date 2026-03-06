@@ -1,25 +1,23 @@
 ---
 name: pdf-to-csv-analyze
-description: Analyze a government roster PDF to understand its structure before writing an extractor. Use at the start of a new PDF-to-CSV project. Takes a PDF path or URL as argument.
+description: Analyze a PDF to understand its structure before writing an extractor. Use at the start of a new PDF-to-CSV project. Takes a PDF path or URL as argument.
 argument-hint: [pdf-path-or-url]
 ---
 
-# PDF Roster Analysis
+# PDF Structure Analysis
 
-Analyze the PDF at `$ARGUMENTS` and produce a structured analysis report that will guide parser development.
+Analyze the PDF at `$ARGUMENTS` and produce a structured report to guide parser development.
 
 ## Steps
 
 ### 1. Obtain the PDF
 
-Write and run a short Python script to inspect the PDF:
-
 ```python
-import pdfplumber, requests, tempfile, sys
+import pdfplumber, requests, tempfile
 
 source = "$ARGUMENTS"
 if source.startswith("http"):
-    r = requests.get(source)
+    r = requests.get(source, timeout=30)
     tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
     tmp.write(r.content); tmp.close()
     pdf_path = tmp.name
@@ -32,138 +30,187 @@ with pdfplumber.open(pdf_path) as pdf:
         print(f"\n--- PAGE {i+1} ---")
         text = page.extract_text()
         print(text[:2000] if text else "[no text]")
-    # Also check last page
     print(f"\n--- LAST PAGE ({len(pdf.pages)}) ---")
     print(pdf.pages[-1].extract_text()[-1000:])
 ```
 
-### 2. Identify Page Structure
+### 2. Classify the PDF Type
 
-From the output, determine:
-- Is page 1 a title/cover page with no record data? (usual answer: yes)
-- How many pages of actual record data are there?
-- What text repeats at the top of each data page? (those are headers to skip)
-- Does the last page (or any page footer) contain "Total Facilities:", "Total Clinics:", or similar? Note that count.
+From the output, determine which type best describes this PDF:
 
-### 3. Identify the Record Header Pattern
+**Type A — Roster/Directory** (one multi-line record per entity)
+- Each entry is a named facility, person, or organization
+- Entries are identified by a consistent header pattern (e.g., location, ID number)
+- Fields span several lines per entry
+- Examples: licensing rosters, personnel directories, vendor lists
 
-Look for what marks the START of each new facility/provider record. In Nebraska DHHS rosters, the pattern is almost always:
+**Type B — Formatted Table** (rows and columns of data)
+- Data is arranged in columns with a header row
+- Each row is one record; columns are fields
+- May span many pages with headers repeating
+- Examples: budget line items, expenditure tables, license lists with columns
 
-```
-TOWN (COUNTY) - ZIPCODE  LICENSE_TYPE
-```
+**Type C — Fixed-Format Data Lines** (structured columns by character position or right-to-left)
+- Each data line contains the same fields in the same positions
+- Numbers appear at the right end of each line; text at the left
+- Often used for payroll, account codes, or financial data
+- Examples: salary rosters, general ledger exports, account listings
 
-Try to write a regex for it. Common examples:
-- `^([A-Z][A-Z\s']+?)\s*\(([A-Z\s]+)\)\s*-\s*(\d{5})\s+(ALF|CDD|RHC-\w+|HOSP-\w+|PSYCH?)\s*(.*)$`
-- Numeric IDs in the first column (for tabular rosters)
+**Type D — Hierarchical/Contextual** (page headers define context for data rows)
+- Page headers establish context (department, campus, fund type, year)
+- Data rows within a page only make sense with that context
+- Often multiple pages share the same structure, different context
+- Examples: university budget books, annual reports by department
 
-Also check: are records identified by something other than town/county (like a numeric license number at start of line)?
+A PDF can combine types (e.g., Type D with Type B tables inside each section).
 
-### 4. Determine Parsing Strategy
+### 3. Identify Page Structure
 
-Run this test to decide between line-by-line vs word-position parsing:
+Determine:
+- How many pages are title/cover/TOC (no data)? These should be skipped.
+- What text repeats at the top of each data page? (Those are headers to skip.)
+- Does the last page (or any footer) contain a total count or sum? Note it.
+- Do page headers carry context (campus name, department, fund type)?
+
+### 4. Run the Right Detection Test
+
+**For Type A (Roster):** Find the record identification pattern.
 
 ```python
 with pdfplumber.open(pdf_path) as pdf:
     page = pdf.pages[1]  # first data page
-
-    print("=== TEXT EXTRACTION ===")
     text = page.extract_text()
-    print(text[:3000] if text else "[none]")
-
-    print("\n=== WORD POSITIONS (first 40 words) ===")
-    words = page.extract_words()
-    for w in words[:40]:
-        print(f"  x={w['x0']:6.1f}  y={w['top']:6.1f}  '{w['text']}'")
+    print(text[:3000])
 ```
 
-**Choose line-by-line text strategy** if:
-- `extract_text()` produces clearly readable records in the right order
-- Records run top-to-bottom with no side-by-side columns
-- Used by: ALF, Hospitals, Rural Health Clinics projects
+Look for a consistent line that starts each record. Common patterns:
+- `TOWN (COUNTY) - ZIPCODE  TYPE` — government licensure rosters
+- A numeric ID or license number at line start
+- An all-caps name followed by an address
+- A date, code, or identifier that always opens a block
 
-**Choose word-position (x/y coordinate) strategy** if:
-- `extract_text()` scrambles text from adjacent columns together
-- The PDF has 2-3 columns side by side on each page
-- x-coordinate ranges clearly separate columns
-- Used by: CDD, Community Pharmacies projects
+Try to write a regex for it.
 
-### 5. Count Lines Per Record and Extract Fields
+Also test word-position (needed if columns are side-by-side):
+```python
+words = page.extract_words()
+for w in words[:40]:
+    print(f"  x={w['x0']:6.1f}  y={w['top']:6.1f}  '{w['text']}'")
+```
 
-Pick one complete record from the output. Count the lines it spans. List every field you see, noting which line each appears on. Common fields in DHHS rosters:
+**For Type B (Table):** Check if pdfplumber sees tables.
 
-- Line 1: town, county, zip_code, facility_type (from header pattern)
-- Line 2: facility_name, license_number
-- Line 3: address
-- Line 4: phone, fax
-- Line 5: licensee
-- Line 6: administrator
-- Line 7 (optional): care_of / mailing address
+```python
+with pdfplumber.open(pdf_path) as pdf:
+    page = pdf.pages[1]
+    tables = page.extract_tables()
+    print(f"Tables found: {len(tables)}")
+    if tables:
+        for row in tables[0][:5]:
+            print(row)
+    # Also try text to see if it reads well without tables
+    print(page.extract_text()[:2000])
+```
 
-Note any fields that:
-- Are sometimes absent (optional fields)
-- Span multiple lines (long addresses)
-- Contain embedded sub-fields (beds, services, accreditation on same line)
+**For Type C (Fixed-Format):** Test layout-preserving extraction.
+
+```python
+with pdfplumber.open(pdf_path) as pdf:
+    page = pdf.pages[1]
+    # layout=True preserves column alignment
+    text = page.extract_text(layout=True)
+    print(text[:3000])
+```
+
+Look for: numbers at line ends, consistent field positions, cost element codes (XX-XXXX-XXXX), salary/FTE values.
+
+**For Type D (Hierarchical):** Identify the context signal.
+
+```python
+with pdfplumber.open(pdf_path) as pdf:
+    for i in [1, 2, 10, 20]:
+        if i < len(pdf.pages):
+            print(f"\n--- PAGE {i+1} HEADER ---")
+            text = pdf.pages[i].extract_text()
+            if text:
+                print('\n'.join(text.split('\n')[:8]))
+```
+
+Look for what changes between pages that defines the grouping (department name, campus, fund category, etc.).
+
+### 5. Extract Fields
+
+Pick one complete record or row from the data. List every distinct field:
+- Which line/column it appears on
+- Whether it's always present or optional
+- Whether it needs post-processing (splitting, cleaning, unit conversion)
+
+Watch for:
+- Numbers with commas or parentheses for negatives: `(1,234)` = -1234
+- Codes with structured formats: `21-6102-0002`, `ALF066`, `511000`
+- Fields embedded together on one line (name + salary + FTE all on line 3)
+- Multi-line fields (addresses, long names, multi-fund sources)
+- Pool/placeholder rows to filter out (POOL, TBA, ADJUSTMENT, SUBTOTAL lines that aren't real records)
 
 ### 6. Sample 3 Complete Records
 
-Extract and display 3 raw record blocks in full (all lines) so the structure is clear.
+Extract and display 3 full records/rows showing all raw content.
 
-### 7. Identify Potential Parsing Challenges
+### 7. Identify Parsing Challenges
 
-Look for:
-- Multi-word county names (BOX BUTTE, SCOTTS BLUFF, RED WILLOW)
-- City names with apostrophes (O'NEILL)
-- Optional fields that appear on some records but not others
-- Page breaks that split a record across pages
-- Header/footer text that could be mistaken for records
+- Lines that look like records but are headers/totals/subtotals
+- Data that wraps across page breaks
+- Inconsistent spacing or alignment between pages
+- Entries that appear multiple times (multi-funding records that need consolidation)
+- Records with optional fields that shift other fields' positions
 
 ---
 
 ## Output Format
 
-Produce this structured report when done:
-
 ```
 ## PDF Analysis: [filename or URL]
 
 **Total pages:** N
-**Cover/title pages to skip:** N
-**Header lines per data page:** N (list them)
-**Total records (from PDF footer):** N
-**Record identification pattern:**
-  Regex: `PATTERN`
-  Example line: [exact text from PDF]
+**Pages to skip (cover/TOC/headers):** N (pages 1-N)
+**PDF type:** [A: Roster / B: Table / C: Fixed-Format / D: Hierarchical / combination]
 
-**Lines per record:** Fixed N / Variable (min N, max N)
-**Parsing strategy:** Line-by-line text OR Word-position coordinates
-**Reason:** [one sentence]
+**Page structure:**
+  - Header lines per data page: N
+  - Context in page headers: [yes — what info / no]
+  - Footer/total detection: [text that signals end of records]
+  - Total record count (from PDF): N (source: [footer text / summary page / not found])
 
-**Column boundaries (if word-position):**
-  col1: x=0-NNN (field name)
-  col2: x=NNN-NNN (field name)
+**Record identification:**
+  [For Type A] Regex: `PATTERN`  |  Example: [exact text from PDF]
+  [For Type B] Table columns: [list]  |  Header row: [exact text]
+  [For Type C] Line format: [describe fields left-to-right]  |  Key right-end pattern: [regex]
+  [For Type D] Context signal: [what field changes per page]  |  Data row pattern: [describe]
 
-**Fields (in order):**
-  1. town — line 1, from header regex group 1
-  2. county — line 1, from header regex group 2
-  ... (complete list)
+**Parsing strategy:**
+  Primary: [line-by-line text / word-position x/y / table extraction / layout=True fixed-format]
+  Reason: [one sentence]
+  [If Type D] Context accumulation: [what to carry from page headers into each row]
 
-**Optional/conditional fields:** [list]
+**Fields (complete list):**
+  1. field_name — [how to extract it]
+  2. ...
 
-**Parsing challenges to watch for:**
-  - [challenge 1]
-  - [challenge 2]
+**Rows/entries to filter out:**
+  [List any non-data lines: SUBTOTAL, POOL, TBA, page headers repeating mid-page, etc.]
 
-**Sample record 1 (raw lines):**
+**Multi-source consolidation needed?** [Yes — describe / No]
+
+**Sample record 1 (raw):**
 [all lines]
 
-**Sample record 2 (raw lines):**
+**Sample record 2 (raw):**
 [all lines]
 
-**Sample record 3 (raw lines):**
+**Sample record 3 (raw):**
 [all lines]
 
 **Recommended next steps:**
-  /pdf-to-csv-scaffold [project-name] [pdf-url]
-  /pdf-to-csv-parse (with this analysis in context)
+  /pdf-to-csv-scaffold [project-name] [pdf-url-or-local]
+  /pdf-to-csv-parse (keep this analysis in context)
 ```

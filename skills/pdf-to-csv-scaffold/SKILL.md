@@ -1,7 +1,7 @@
 ---
 name: pdf-to-csv-scaffold
 description: Create standard project boilerplate for a new PDF-to-CSV extraction project. Use after /pdf-to-csv-analyze, before /pdf-to-csv-parse.
-argument-hint: [project-name] [pdf-url]
+argument-hint: [project-name] [pdf-url-or-local-path]
 ---
 
 # PDF-to-CSV Project Scaffold
@@ -9,12 +9,12 @@ argument-hint: [project-name] [pdf-url]
 Set up the standard directory structure and boilerplate files for a new PDF-to-CSV project.
 
 **Arguments:** `$ARGUMENTS`
-- Argument 1: project directory name (e.g., `dhhs-nursing-homes`)
-- Argument 2: PDF download URL
+- Argument 1: project directory name (e.g., `salary-extract`, `city-budgets`)
+- Argument 2: PDF source — a URL to download from, or a local file path. Omit if PDFs are placed manually.
 
 If arguments are missing, ask the user before proceeding.
 
-Derive a short slug from the project name for use in filenames (e.g., `dhhs-nursing-homes` → `nursing_homes`, `dhhs-rural-health-clinics` → `rhc_roster`). Ask the user to confirm the slug.
+Derive a short slug from the project name for use in filenames (e.g., `salary-extract` → `salary`, `city-budgets` → `city_budgets`). Ask the user to confirm the slug.
 
 ---
 
@@ -73,11 +73,10 @@ Do NOT gitignore `data/` or `pdfs/` directories themselves. The `.gitkeep` files
 ```markdown
 # {Project Title}
 
-Extracts Nebraska DHHS {facility type} roster data from the monthly PDF and converts it to a structured CSV.
+Extracts {document description} from PDF and converts it to a structured CSV.
 
-**Source:** {PDF URL}
-**Published by:** Nebraska DHHS Division of Public Health – Licensure Unit
-**Update frequency:** [Monthly / Quarterly / As needed]
+**Source:** {PDF URL or local path}
+**Update frequency:** [As released / Monthly / Annually / Ad-hoc]
 
 ## Usage
 
@@ -86,7 +85,11 @@ pip install -r requirements.txt
 python parse_{slug}.py
 ```
 
+[If the script downloads the PDF automatically:]
 The script downloads the current PDF, extracts all records, and writes output to `data/{slug}_{YYYY-MM-DD}.csv`.
+
+[If PDFs are placed manually:]
+Place the PDF in `pdfs/` and run the script. Output is written to `data/{slug}_{YYYY-MM-DD}.csv`.
 
 ## Output Fields
 
@@ -102,7 +105,7 @@ pytest test_parse_{slug}.py -v
 
 ## Data Archive
 
-Downloaded PDFs are saved to `pdfs/` and CSVs to `data/`, both with date stamps.
+PDFs are saved to `pdfs/` and CSVs to `data/`, both with date or year stamps.
 ```
 
 ### CLAUDE.md
@@ -111,11 +114,12 @@ Downloaded PDFs are saved to `pdfs/` and CSVs to `data/`, both with date stamps.
 # {Project Title}
 
 ## Purpose
-Extract Nebraska DHHS {facility type} roster data from PDF to structured CSV.
+Extract {document description} from PDF to structured CSV.
 
 ## Source PDF
-URL: {PDF URL}
-Downloaded to: `pdfs/{Slug}_{YYYY-MM-DD}.pdf`
+{URL or local path}
+[If downloaded:] Saved to: `pdfs/{Slug}_{YYYY-MM-DD}.pdf`
+[If local:] Place PDF in `pdfs/` before running.
 
 ## Running
 ```bash
@@ -167,7 +171,9 @@ SOFTWARE.
 
 ### .github/workflows/update-roster.yml
 
-Ask the user: "What schedule should the GitHub Actions workflow run on? (Monthly on the 15th is standard for DHHS rosters. Some are quarterly — January, April, July, October.)"
+Ask the user: "Should a GitHub Actions workflow be set up for automated updates? If so, what schedule? (e.g., monthly, quarterly, annually, or manual-only)"
+
+Only create the workflow if the user wants automation and the PDF is downloadable from a URL. Skip for local-file-only projects.
 
 ```yaml
 name: Update {Project Title}
